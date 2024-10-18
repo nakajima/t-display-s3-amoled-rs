@@ -8,11 +8,16 @@ use embedded_graphics::{
     primitives::Rectangle,
     Pixel,
 };
-use embedded_hal_1::{delay::DelayNs, digital::OutputPin};
+use embedded_hal::{delay::DelayNs, digital::OutputPin};
+use esp_backtrace as _;
 
-use hal::{
-    prelude::_esp_hal_dma_DmaTransfer,
-    spi::{HalfDuplexMode, SpiDataMode, master::{dma::SpiDma, Command, Address}},
+use esp_hal::{
+    dma::ReadBuffer,
+    spi::{
+        master::{Address, Command, HalfDuplexReadWrite, SpiDmaBus},
+        HalfDuplexMode, SpiDataMode,
+    },
+    Async,
 };
 
 use crate::rm67162::Orientation;
@@ -23,11 +28,10 @@ const BUFFER_PIXELS: usize = 16368 / 2;
 const BUFFER_SIZE: usize = BUFFER_PIXELS * 2;
 static mut DMA_BUFFER: [u8; BUFFER_SIZE] = [0u8; BUFFER_SIZE];
 
-pub type SpiType<'d> =
-    SpiDma<'d, hal::peripherals::SPI2, hal::gdma::Channel0, HalfDuplexMode>;
+pub type SpiType<'d> = SpiDmaBus<'d, esp_hal::peripherals::SPI2, HalfDuplexMode, Async>;
 
 pub struct RM67162Dma<'a, CS> {
-    spi: Option<SpiType<'a>>,
+    spi: SpiType<'a>,
     cs: CS,
     orientation: Orientation,
 }
@@ -36,12 +40,9 @@ impl<CS> RM67162Dma<'_, CS>
 where
     CS: OutputPin,
 {
-    pub fn new<'a>(
-        spi: SpiType<'a>,
-        cs: CS,
-    ) -> RM67162Dma<'a, CS> {
+    pub fn new<'a>(spi: SpiType<'a>, cs: CS) -> RM67162Dma<'a, CS> {
         RM67162Dma {
-            spi: Some(spi),
+            spi: spi,
             cs,
             orientation: Orientation::Portrait,
         }
@@ -63,28 +64,24 @@ where
     }
 
     fn send_cmd(&mut self, cmd: u32, data: &[u8]) -> Result<(), ()> {
-        let txbuf = StaticReadBuffer::new(data.as_ptr(), data.len());
         self.cs.set_low().unwrap();
 
-        let mut spi = self.spi.take().unwrap();
-        let tx = spi
+        self.spi
             .write(
                 SpiDataMode::Single,
                 Command::Command8(0x02, SpiDataMode::Single),
                 Address::Address24(cmd << 8, SpiDataMode::Single),
                 0,
-                txbuf,
+                &data,
             )
             .unwrap();
-        (_, spi) = tx.wait().unwrap();
-        self.spi.replace(spi);
 
         self.cs.set_high().unwrap();
         Ok(())
     }
 
     // rm67162_qspi_init
-    pub fn init(&mut self, delay: &mut impl embedded_hal_1::delay::DelayNs) -> Result<(), ()> {
+    pub fn init(&mut self, delay: &mut impl embedded_hal::delay::DelayNs) -> Result<(), ()> {
         for _ in 0..3 {
             self.send_cmd(0x11, &[])?; // sleep out
             delay.delay_ms(120);
@@ -130,22 +127,17 @@ where
         self.set_address(x, y, x, y)?;
 
         let raw = color.to_be_bytes();
-        let txbuf = StaticReadBuffer::new(raw.as_ptr(), 2);
-
         self.cs.set_low().unwrap();
 
-        let mut spi = self.spi.take().unwrap();
-        let tx = spi
+        self.spi
             .write(
                 SpiDataMode::Quad,
                 Command::Command8(0x32, SpiDataMode::Single),
                 Address::Address24(0x2C << 8, SpiDataMode::Single),
                 0,
-                txbuf,
+                &raw,
             )
             .unwrap();
-        (_, spi) = tx.wait().unwrap();
-        self.spi.replace(spi);
 
         self.cs.set_high().unwrap();
         Ok(())
@@ -153,23 +145,25 @@ where
 
     #[inline]
     fn dma_send_colors(&mut self, txbuf: StaticReadBuffer, first_send: bool) -> Result<(), ()> {
-        let mut spi = self.spi.take().unwrap();
+        let data = core::ptr::slice_from_raw_parts(txbuf.buffer, txbuf.len);
 
-        let tx = if first_send {
-            spi.write(
-                SpiDataMode::Quad,
-                Command::Command8(0x32, SpiDataMode::Single),
-                Address::Address24(0x2C << 8, SpiDataMode::Single),
-                0,
-                txbuf,
-            )
-            .unwrap()
-        } else {
-            spi.write(SpiDataMode::Quad, Command::None, Address::None, 0, txbuf)
-                .unwrap()
-        };
-        (_, spi) = tx.wait().unwrap();
-        self.spi.replace(spi);
+        unsafe {
+            if first_send {
+                self.spi
+                    .write(
+                        SpiDataMode::Quad,
+                        Command::Command8(0x32, SpiDataMode::Single),
+                        Address::Address24(0x2C << 8, SpiDataMode::Single),
+                        0,
+                        &*data,
+                    )
+                    .unwrap()
+            } else {
+                self.spi
+                    .write(SpiDataMode::Quad, Command::None, Address::None, 0, &*data)
+                    .unwrap()
+            };
+        }
         Ok(())
     }
 
@@ -340,11 +334,9 @@ impl StaticReadBuffer {
     }
 }
 
-unsafe impl hal::prelude::_embedded_dma_ReadBuffer for StaticReadBuffer {
-    type Word = u8;
-
+unsafe impl ReadBuffer for StaticReadBuffer {
     #[inline]
-    unsafe fn read_buffer(&self) -> (*const Self::Word, usize) {
-        (self.buffer, self.len)
+    unsafe fn read_buffer(&self) -> (*const u8, usize) {
+        todo!()
     }
 }

@@ -6,10 +6,14 @@ use embedded_graphics::{
     primitives::Rectangle,
     Pixel,
 };
-use embedded_hal_1::{delay::DelayNs, digital::OutputPin};
-use hal::{
+use embedded_hal::{delay::DelayNs, digital::OutputPin};
+use esp_backtrace as _;
+use esp_hal::{
     peripherals::SPI2,
-    spi::{HalfDuplexMode, SpiDataMode, master::{Spi, Command, Address, HalfDuplexReadWrite}},
+    spi::{
+        master::{Address, Command, HalfDuplexReadWrite, Spi},
+        HalfDuplexMode, SpiDataMode,
+    },
 };
 
 pub mod dma;
@@ -82,7 +86,7 @@ where
     }
 
     // rm67162_qspi_init
-    pub fn init(&mut self, delay: &mut impl embedded_hal_1::delay::DelayNs) -> Result<(), ()> {
+    pub fn init(&mut self, delay: &mut impl embedded_hal::delay::DelayNs) -> Result<(), ()> {
         for _ in 0..3 {
             self.send_cmd(0x11, &[])?; // sleep out
             delay.delay_ms(120);
